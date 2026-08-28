@@ -27,7 +27,7 @@ where ``category`` is lowercase (roads, buildings, waterways, landuse).
 
 By default this script writes that exact key layout (no extra top-level prefix),
 so sandbox extracts work with the existing frontend once they land in the same
-bucket pointed at by EXPORT_TOOL_S3_URL. Set ``output_key_prefix`` only if you
+bucket pointed at by EXPORT_TOOL_S3_URL. Set ``sandbox_prefix`` only if you
 intentionally want a separate namespace (and then teach the frontend to match).
 
 Parameters
@@ -62,10 +62,10 @@ engine : str
     "quackosm" uses QuackOSM for better relation support (requires quackosm package).
 output_bucket : str
     S3 bucket to upload output zips to. Ignored when output_local_dir is set.
-output_key_prefix : str
+sandbox_prefix : str
     Optional top-level S3 prefix prepended to each object key. Leave empty
     (default) so keys match the TM DownloadOsmData UI
-    (TM/hotosm_project_{id}/...). Formerly named sandbox_prefix.
+    (TM/hotosm_project_{id}/...).
 output_local_dir : str
     If set, write output zips to this local directory instead of S3. Useful for
     testing. The PBF is still downloaded from S3.
@@ -79,6 +79,7 @@ config : dict | None
 duckdb_memory_limit : str
     Memory limit passed to DuckDB (e.g. "4GB"). Increase for large PBFs.
 """
+
 from __future__ import annotations
 
 import json
@@ -99,6 +100,7 @@ def _import_duckdb():
     import duckdb
 
     return duckdb
+
 
 # --------------------------------------------------------------------------- #
 # Default TM-format config (the YAML twin of TM-Extractor/config.json, as a dict)
@@ -392,22 +394,26 @@ class Extractor:
             if (gtype and gtype[0].upper().startswith("GEOMETRY"))
             else "ST_GeomFromWKB(geometry)"
         )
-        self.con.execute(
-            f"""
+        self.con.execute(f"""
             CREATE OR REPLACE TABLE features AS
             SELECT TRY_CAST(regexp_extract(feature_id,'[0-9]+$') AS BIGINT) AS osm_id,
                    tags, {geom_expr} AS geom
-            FROM read_parquet('{pq}')"""
-        )
-        self.con.execute(
-            "CREATE OR REPLACE TABLE osm_points AS SELECT osm_id,tags,geom FROM features WHERE ST_GeometryType(geom)='POINT'"
-        )
-        self.con.execute(
-            "CREATE OR REPLACE TABLE osm_lines AS SELECT osm_id,tags,geom FROM features WHERE ST_GeometryType(geom) IN ('LINESTRING','MULTILINESTRING')"
-        )
-        self.con.execute(
-            "CREATE OR REPLACE TABLE osm_polygons AS SELECT osm_id,tags,geom FROM features WHERE ST_GeometryType(geom) IN ('POLYGON','MULTIPOLYGON')"
-        )
+            FROM read_parquet('{pq}')""")
+        self.con.execute("""
+            CREATE OR REPLACE TABLE osm_points AS
+            SELECT osm_id, tags, geom FROM features
+            WHERE ST_GeometryType(geom) = 'POINT'
+            """)
+        self.con.execute("""
+            CREATE OR REPLACE TABLE osm_lines AS
+            SELECT osm_id, tags, geom FROM features
+            WHERE ST_GeometryType(geom) IN ('LINESTRING', 'MULTILINESTRING')
+            """)
+        self.con.execute("""
+            CREATE OR REPLACE TABLE osm_polygons AS
+            SELECT osm_id, tags, geom FROM features
+            WHERE ST_GeometryType(geom) IN ('POLYGON', 'MULTIPOLYGON')
+            """)
 
     def _build_pure(self):
         pbf = self.pbf_path.replace("'", "''")
@@ -421,39 +427,31 @@ class Extractor:
             SELECT id AS node_id, ST_Point(lon,lat) AS geom, tags FROM raw_osm
             WHERE kind='node' AND lon BETWEEN -180 AND 180 AND lat BETWEEN -90 AND 90"""
         )
-        self.con.execute(
-            """
+        self.con.execute("""
             CREATE OR REPLACE TABLE osm_points AS
             SELECT node_id AS osm_id, tags, geom FROM node_pts
-            WHERE tags IS NOT NULL AND len(map_keys(tags)) > 0"""
-        )
-        self.con.execute(
-            """
+            WHERE tags IS NOT NULL AND len(map_keys(tags)) > 0""")
+        self.con.execute("""
             CREATE OR REPLACE TABLE way_nodes AS
             SELECT id AS way_id, tags, UNNEST(refs) AS ref, UNNEST(range(length(refs))) AS ref_idx
-            FROM raw_osm WHERE kind='way'"""
-        )
-        self.con.execute(
-            """
+            FROM raw_osm WHERE kind='way'""")
+        self.con.execute("""
             CREATE OR REPLACE TABLE way_geom AS
             SELECT w.way_id, any_value(w.tags) AS tags,
                    ST_MakeLine(list(n.geom ORDER BY w.ref_idx)) AS line_geom,
                    count(*) AS n_pts,
                    arg_min(w.ref,w.ref_idx) AS first_ref, arg_max(w.ref,w.ref_idx) AS last_ref
             FROM way_nodes w JOIN node_pts n ON n.node_id=w.ref
-            GROUP BY w.way_id HAVING count(*)>=2"""
-        )
+            GROUP BY w.way_id HAVING count(*)>=2""")
         self.con.execute(
             "CREATE OR REPLACE TABLE osm_lines AS SELECT way_id AS osm_id, tags, line_geom AS geom FROM way_geom"
         )
-        self.con.execute(
-            f"""
+        self.con.execute(f"""
             CREATE OR REPLACE TABLE osm_polygons AS
             SELECT way_id AS osm_id, tags, ST_MakeValid(ST_MakePolygon(line_geom)) AS geom
             FROM way_geom
             WHERE n_pts>=4 AND first_ref=last_ref AND ST_IsClosed(line_geom)
-              AND COALESCE({area_val},'') <> 'no'"""
-        )
+              AND COALESCE({area_val},'') <> 'no'""")
 
     # --- per project export ------------------------------------------------
     def export_project(self, project_id, boundary_geojson, dataset, categories):
@@ -476,8 +474,8 @@ class Extractor:
                     WHERE ({where}) AND ST_Intersects(geom, ST_GeomFromGeoJSON('{bnd}'))"""
                 )
                 n = self.con.execute("SELECT count(*) FROM _cat").fetchone()[0]
-                if n == 0:
-                    continue
+                # Publish valid empty datasets too, replacing stale exports from
+                # earlier runs when a category no longer has matching features.
                 for fmt in body["formats"]:
                     driver, lco = FORMAT_DRIVERS[fmt]
                     tail = ""
@@ -545,9 +543,7 @@ def main(
     output_bucket: str = "your-output-bucket",
     # Empty by default so keys match DownloadOsmData (TM/hotosm_project_{id}/...).
     # Pass e.g. "sandbox" only if you intentionally isolate objects under a prefix.
-    output_key_prefix: str = "",
-    # Backward-compatible alias used by hotosm/tasking-manager#7275.
-    sandbox_prefix: Optional[str] = None,
+    sandbox_prefix: str = "",
     output_local_dir: str = "",  # if set, write locally instead of S3
     aws: Optional[
         dict
@@ -557,10 +553,6 @@ def main(
 ) -> dict:
     from datetime import date
     from datetime import timedelta
-
-    # Prefer explicit output_key_prefix; fall back to legacy sandbox_prefix kwarg.
-    if sandbox_prefix is not None and not output_key_prefix:
-        output_key_prefix = sandbox_prefix
 
     date_str = (
         pbf_date.strip()
@@ -580,7 +572,6 @@ def main(
         logger.info("No projects matched; nothing to do.")
         return {"projects": 0, "published": 0, "failures": 0, "keys": []}
 
-    work_dir = tempfile.mkdtemp(prefix="sbx_")
     use_s3 = not output_local_dir
     s3 = _s3_client(aws) if use_s3 else None
     bucket_loc = None
@@ -593,37 +584,36 @@ def main(
         except Exception:  # noqa: BLE001
             bucket_loc = "us-east-1"
 
-    pbf_path = _download_pbf(pbf_source, aws, work_dir)
-    ex = Extractor(pbf_path, work_dir, engine, memory_limit=duckdb_memory_limit)
-
     published, failures, keys = 0, 0, []
-    try:
-        ex.build()
-        for proj in projects:
-            try:
-                outputs = ex.export_project(
-                    proj["project_id"],
-                    json.dumps(proj["geometry"]),
-                    dataset,
-                    categories,
-                )
-                for local_zip, rel_key in outputs:
-                    if use_s3:
-                        key = build_object_key(rel_key, output_key_prefix)
-                        s3.upload_file(local_zip, output_bucket, key)
-                        keys.append(f"s3://{output_bucket}/{key}")
-                    else:
-                        dest = os.path.join(output_local_dir, rel_key)
-                        os.makedirs(os.path.dirname(dest), exist_ok=True)
-                        shutil.copy2(local_zip, dest)
-                        keys.append(dest)
-                    published += 1
-            except Exception:  # noqa: BLE001
-                failures += 1
-                logger.exception("Project %s failed", proj["project_id"])
-    finally:
-        ex.close()
-        shutil.rmtree(work_dir, ignore_errors=True)
+    with tempfile.TemporaryDirectory(prefix="sbx_") as work_dir:
+        pbf_path = _download_pbf(pbf_source, aws, work_dir)
+        ex = Extractor(pbf_path, work_dir, engine, memory_limit=duckdb_memory_limit)
+        try:
+            ex.build()
+            for proj in projects:
+                try:
+                    outputs = ex.export_project(
+                        proj["project_id"],
+                        json.dumps(proj["geometry"]),
+                        dataset,
+                        categories,
+                    )
+                    for local_zip, rel_key in outputs:
+                        if use_s3:
+                            key = build_object_key(rel_key, sandbox_prefix)
+                            s3.upload_file(local_zip, output_bucket, key)
+                            keys.append(f"s3://{output_bucket}/{key}")
+                        else:
+                            dest = os.path.join(output_local_dir, rel_key)
+                            os.makedirs(os.path.dirname(dest), exist_ok=True)
+                            shutil.copy2(local_zip, dest)
+                            keys.append(dest)
+                        published += 1
+                except Exception:  # noqa: BLE001
+                    failures += 1
+                    logger.exception("Project %s failed", proj["project_id"])
+        finally:
+            ex.close()
 
     summary = {
         "engine": engine,
@@ -631,7 +621,7 @@ def main(
         "published": published,
         "failures": failures,
         "keys": keys,
-        "output_key_prefix": output_key_prefix or "",
+        "sandbox_prefix": sandbox_prefix,
     }
     if bucket_loc:
         summary["bucket_location"] = bucket_loc

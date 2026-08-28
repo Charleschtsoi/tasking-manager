@@ -43,7 +43,7 @@ once objects are in the bucket behind `EXPORT_TOOL_S3_URL`.
 | `tm_api_base_url` | e.g. `https://tasks.hotosm.org/api/v2` |
 | `sandbox` | `true` (uses `/projects/queries/active/?sandbox=true`) |
 | `output_bucket` | Same bucket (or CDN origin) as `EXPORT_TOOL_S3_URL` |
-| `output_key_prefix` | Leave empty for UI-compatible keys |
+| `sandbox_prefix` | Leave empty for UI-compatible keys |
 
 4. Confirm dated PBFs exist at `s3://{pbf_bucket}/exports/{YYYY-MM-DD}/{pbf_filename}`
    before the job runs (`pbf_date_offset_days=1` targets yesterday by default).
