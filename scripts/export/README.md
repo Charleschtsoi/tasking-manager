@@ -51,10 +51,17 @@ once objects are in the bucket behind `EXPORT_TOOL_S3_URL`.
 ## Local dry-run
 
 ```bash
-# After installing duckdb/boto3/requests, invoke main with output_local_dir set
-# and boundary_source="static" plus a small FeatureCollection to avoid S3 uploads.
-python -c "from scripts.export.pbf_data_export import category_slug, build_object_key; \
-print(category_slug('Roads')); print(build_object_key('TM/hotosm_project_1/roads/lines/x.zip'))"
+# After installing duckdb, invoke main() with a local PBF and write zips to disk:
+python -c "
+from scripts.export.pbf_data_export import main
+print(main(
+    pbf_source='/path/to/extract.osm.pbf',
+    boundary_source='tm_api',
+    tm_api_base_url='https://tasking-manager-production-api.hotosm.org/api/v2',
+    sandbox=True,
+    output_local_dir='/tmp/sandbox-export-out',
+))
+"
 ```
 
 ## Relationship to TM-Extractor

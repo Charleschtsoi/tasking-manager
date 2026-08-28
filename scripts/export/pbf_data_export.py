@@ -43,6 +43,9 @@ pbf_date_offset_days : int
 pbf_filename : str
     Filename of the PBF inside the dated S3 prefix
     (e.g. exports/<date>/<pbf_filename>).
+pbf_source : str
+    Optional local path or s3:// URI. When set, this is used instead of
+    s3://{pbf_bucket}/exports/{date}/{pbf_filename}. Intended for dry-runs.
 boundary_source : str
     "tm_api" to fetch project boundaries from the TM active-projects API, or
     "static" to use the GeoJSON passed in static_boundary.
@@ -532,6 +535,7 @@ def main(
     pbf_date: str = "",  # YYYY-MM-DD; defaults to today minus pbf_date_offset_days
     pbf_date_offset_days: int = 1,  # how many days back to look; 1 = yesterday
     pbf_filename: str = "sandbox-export.pbf",
+    pbf_source: str = "",  # local path or s3:// URI; overrides bucket/date/filename
     boundary_source: str = "tm_api",  # "tm_api" | "static"
     tm_api_base_url: str = "https://your-tm-api/api/v2",
     active_interval: int = 24,
@@ -558,7 +562,9 @@ def main(
         pbf_date.strip()
         or (date.today() - timedelta(days=pbf_date_offset_days)).isoformat()
     )
-    pbf_source = f"s3://{pbf_bucket}/exports/{date_str}/{pbf_filename}"
+    pbf_source = (pbf_source or "").strip() or (
+        f"s3://{pbf_bucket}/exports/{date_str}/{pbf_filename}"
+    )
     logger.info("PBF source: %s", pbf_source)
 
     cfg = config or DEFAULT_CONFIG
