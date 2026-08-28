@@ -2,6 +2,7 @@
 
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,7 @@ if EXPORT_DIR not in sys.path:
     sys.path.insert(0, EXPORT_DIR)
 
 from pbf_data_export import (  # noqa: E402
+    Extractor,
     build_object_key,
     category_slug,
 )
@@ -83,3 +85,44 @@ def test_frontend_download_path_contract_example():
         build_object_key(rel)
         == "TM/hotosm_project_42/buildings/polygons/hotosm_project_42_buildings_polygons_geojson.zip"
     )
+
+
+def test_export_project_propagates_gdal_copy_failure(tmp_path):
+    class CopyError(Exception):
+        pass
+
+    class FakeConnection:
+        def execute(self, query):
+            if query.startswith("SELECT count(*)"):
+                return self
+            if query.startswith("COPY "):
+                raise CopyError("GDAL driver unavailable")
+            return self
+
+        def fetchone(self):
+            return (1,)
+
+    extractor = Extractor.__new__(Extractor)
+    extractor.work_dir = str(tmp_path)
+    extractor.map_returns_list = False
+    extractor.con = FakeConnection()
+    extractor._duckdb = SimpleNamespace(Error=CopyError)
+
+    categories = [
+        {
+            "Buildings": {
+                "types": ["polygons"],
+                "select": ["building"],
+                "where": "tags['building'] IS NOT NULL",
+                "formats": ["geojson"],
+            }
+        }
+    ]
+
+    with pytest.raises(RuntimeError, match="GDAL driver unavailable"):
+        extractor.export_project(
+            42,
+            '{"type":"Polygon","coordinates":[]}',
+            {"dataset_folder": "TM"},
+            categories,
+        )

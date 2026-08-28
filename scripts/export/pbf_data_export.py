@@ -501,14 +501,10 @@ class Extractor:
                             f"COPY _cat TO '{out_file}' WITH (FORMAT GDAL, DRIVER '{driver}'{tail})"
                         )
                     except self._duckdb.Error as exc:
-                        logger.error(
-                            "[p%s] %s COPY failed (driver missing?): %s",
-                            project_id,
-                            base,
-                            exc,
-                        )
                         shutil.rmtree(fmt_dir, ignore_errors=True)
-                        continue
+                        raise RuntimeError(
+                            f"[p{project_id}] {base} export failed: {exc}"
+                        ) from exc
                     zip_path = os.path.join(abs_dir, f"{base}.zip")
                     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                         for fn in sorted(os.listdir(fmt_dir)):
